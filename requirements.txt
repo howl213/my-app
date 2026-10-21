@@ -1,0 +1,15 @@
+# FastAPI 웹 애플리케이션 프레임워크
+fastapi
+
+# FastAPI 애플리케이션 실행 서버
+uvicorn
+
+# MariaDB/MySQL 연결 드라이버
+pymysql
+
+# FastAPI Form(...) 처리에 필요
+python-multipart
+
+# 로컬 및 GitHub Actions 테스트에 필요
+pytest
+httpx

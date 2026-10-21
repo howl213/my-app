@@ -1,0 +1,111 @@
+name: my-app CI
+
+on:
+  push:
+    branches: [main]
+
+# 연속 Merge 시 Manifest 저장소 Push 충돌을 막기 위해 main Push는 순차 실행합니다.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+
+    # 연습용으로 main Push만 트리거합니다(운영 환경에서는 브랜치/PR 사용 권장).
+    # main에 push되면 테스트 → 이미지 빌드 → ECR 업로드 → Manifest 갱신을 수행합니다.
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      AWS_REGION: ap-northeast-2
+      ECR_REPOSITORY: fastapi-backend
+      AWS_ACCOUNT_ID: "000606610427"
+      MANIFEST_REPOSITORY: howl213/my-k8s-manifests
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: PYTHONPATH=. python -m pytest -q
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+
+      - name: Login to Amazon ECR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build multi-platform image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: |
+            ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:latest
+
+      # ECR Push 후 Manifest 저장소의 이미지 태그를 자동으로 갱신합니다.
+      - name: Checkout manifest repository
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MANIFEST_REPOSITORY }}
+          token: ${{ secrets.MANIFEST_REPO_TOKEN }}
+          path: manifest-repo
+          ref: main
+
+      - name: Update manifest image tag
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          MANIFEST_FILE="manifest-repo/monolith/frontend.yml"
+          IMAGE_REPOSITORY="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}"
+
+          # 이미지 줄이 없으면 sed가 조용히 넘어가므로 먼저 존재 여부를 확인합니다.
+          if ! grep -qE "image: ${IMAGE_REPOSITORY}:" "$MANIFEST_FILE"; then
+            echo "::error::${MANIFEST_FILE}에서 ${IMAGE_REPOSITORY} 이미지 줄을 찾지 못했습니다."
+            exit 1
+          fi
+
+          sed -i -E "s#(image: ${IMAGE_REPOSITORY}:).*#\1${IMAGE_TAG}#" "$MANIFEST_FILE"
+
+          cd manifest-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add monolith/frontend.yml
+
+          if git diff --cached --quiet; then
+            echo "Manifest image tag is already up to date."
+            exit 0
+          fi
+
+          git commit -m "Update monolith image to ${IMAGE_TAG}"
+          git pull --rebase origin main
+          git push origin main
