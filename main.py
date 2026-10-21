@@ -22,7 +22,7 @@ def read_root():
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    return {"status": "ok", "version": "v2"}
 
 
 @app.post("/api/register")
