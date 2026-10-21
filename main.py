@@ -17,7 +17,7 @@ def get_connection():
 
 @app.get("/")
 def read_root():
-    return {"message": "my-app is running running running !!!!!!"}
+    return {"message": "my-app is running v2"}
 
 
 @app.get("/health")
